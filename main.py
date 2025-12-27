@@ -1,6 +1,9 @@
-def main():
-    print("Hello from rag-agent-project!")
-
-
-if __name__ == "__main__":
-    main()
+import logging
+from fastapi import FastAPI
+import inngest.fast_api
+from dotenv import load_dotenv
+import uuid
+import os
+import datetime
+from inngest.experimental import ai
+import google.generativeai as genai
