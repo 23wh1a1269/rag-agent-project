@@ -10,3 +10,9 @@ wheels/
 .venv
 /uploads
 .env
+
+# Local logs
+*.log
+
+# JavaScript dependencies (any subfolder)
+node_modules/

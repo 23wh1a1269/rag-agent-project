@@ -1,8 +1,12 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+import shutil
+
 import inngest
 import inngest.fast_api
 from inngest.experimental import ai
+from groq import Groq
 from dotenv import load_dotenv
 import uuid
 import os
@@ -10,6 +14,7 @@ import datetime
 from data_loader import load_and_chunk_pdf, embed_texts
 from vector_db import QdrantStorage
 from custom_types import RAQQueryResult, RAGSearchResult, RAGUpsertResult, RAGChunkAndSrc
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -25,7 +30,7 @@ inngest_client = inngest.Inngest(
     fn_id="RAG: Ingest PDF",
     trigger=inngest.TriggerEvent(event="rag/ingest_pdf"),
     throttle=inngest.Throttle(
-        count=2, period=datetime.timedelta(minutes=1)
+        limit=2, period=datetime.timedelta(minutes=1)
     ),
     rate_limit=inngest.RateLimit(
         limit=1,
@@ -78,27 +83,66 @@ async def rag_query_pdf_ai(ctx: inngest.Context):
         "Answer concisely using the context above."
     )
 
-    adapter = ai.openai.Adapter(
-        auth_key=os.getenv("OPENAI_API_KEY"),
-        model="gpt-4o-mini"
-    )
-
-    res = await ctx.step.ai.infer(
-        "llm-answer",
-        adapter=adapter,
-        body={
-            "max_tokens": 1024,
-            "temperature": 0.2,
-            "messages": [
+    def _ask_groq(content: str) -> str:
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        chat_completion = client.chat.completions.create(
+            messages=[
                 {"role": "system", "content": "You answer questions using only the provided context."},
-                {"role": "user", "content": user_content}
-            ]
-        }
-    )
+                {"role": "user", "content": content}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+            max_tokens=1024,
+        )
+        return chat_completion.choices[0].message.content
 
-    answer = res["choices"][0]["message"]["content"].strip()
+    answer = await ctx.step.run("groq-answer", lambda: _ask_groq(user_content))
     return {"answer": answer, "sources": found.sources, "num_contexts": len(found.contexts)}
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    uploads_dir = os.path.join(os.getcwd(), "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    file_path = os.path.join(uploads_dir, file.filename)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Trigger Inngest
+    await inngest_client.send(
+        inngest.Event(
+            name="rag/ingest_pdf",
+            data={
+                "pdf_path": file_path,
+                "source_id": file.filename,
+            },
+        )
+    )
+    
+    return {"message": "Upload successful", "filename": file.filename}
+
+class QueryRequest(BaseModel):
+    question: str
+    top_k: int = 5
+
+@app.post("/query")
+async def query(req: QueryRequest):
+    event_ids = await inngest_client.send(
+        inngest.Event(
+            name="rag/query_pdf_ai",
+            data={"question": req.question, "top_k": req.top_k},
+        )
+    )
+    return {"event_id": event_ids[0]}
 
 inngest.fast_api.serve(app, inngest_client, [rag_ingest_pdf, rag_query_pdf_ai])

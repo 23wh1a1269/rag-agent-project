@@ -15,7 +15,15 @@ st.set_page_config(page_title="RAG Ingest PDF", page_icon="📄", layout="center
 
 @st.cache_resource
 def get_inngest_client() -> inngest.Inngest:
-    return inngest.Inngest(app_id="rag_app", is_production=False)
+    base_url = os.getenv("INNGEST_BASE_URL")
+    return inngest.Inngest(
+        app_id="rag_app", 
+        is_production=os.getenv("INNGEST_IS_PRODUCTION", "false").lower() == "true",
+        api_base_url=base_url,
+        event_api_base_url=base_url
+    )
+
+
 
 
 def save_uploaded_pdf(file) -> Path:
